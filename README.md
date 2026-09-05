@@ -210,4 +210,3 @@ python3 -m pytest tests/ -v
 This prototype is created for the **Razorpay AI Buildathon 2026**.
 - No real financial transactions are executed.
 - No live banking or customer PII is accessed.
-- Built by Team Veridyn.
