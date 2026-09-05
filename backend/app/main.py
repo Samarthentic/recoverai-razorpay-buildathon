@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import Base, engine
+from app import models
 
 # Configure logging
 logging.basicConfig(
