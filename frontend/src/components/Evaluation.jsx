@@ -86,8 +86,25 @@ export default function Evaluation() {
         </div>
       </div>
 
-      {/* SECTION 1: FINANCIAL REVENUE BENCHMARKS */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-6 space-y-4">
+      {!stats?.has_analysis ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-8 shadow-2xs text-center space-y-3">
+          <div className="h-12 w-12 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto shadow-2xs">
+            <BarChart3 className="h-6 w-6" />
+          </div>
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase tracking-wider">
+            ● READY FOR ANALYSIS
+          </span>
+          <h2 className="text-lg font-bold text-slate-900">
+            No Recovery Analysis Executed Yet
+          </h2>
+          <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+            {stats.payment_count || 520} synthetic payments with hidden ground-truth labels are loaded. Run a recovery batch from the Overview tab to compute live precision, recall, F1, and financial recovery efficiency benchmarks.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* SECTION 1: FINANCIAL REVENUE BENCHMARKS */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-6 space-y-4">
         <div className="flex items-center justify-between pb-3 border-b border-slate-100">
           <div className="flex items-center gap-2">
             <TrendingUp className="h-4 w-4 text-emerald-600" />
@@ -356,6 +373,8 @@ export default function Evaluation() {
           </div>
         </div>
       </div>
-    </div>
-  );
+    </>
+  )}
+</div>
+);
 }

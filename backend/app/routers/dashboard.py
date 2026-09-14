@@ -2,47 +2,48 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import BatchRun
+from app.models import BatchRun, Payment
 from app.schemas import DashboardStats
 
 router = APIRouter()
 
 @router.get("/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats(db: Session = Depends(get_db)):
+    total_payment_count = db.query(Payment).count()
+
+    # 1. Running batch takes highest precedence
+    running_batch = db.query(BatchRun).filter(BatchRun.status == "running").first()
+    if running_batch:
+        return DashboardStats(
+            state="running",
+            has_analysis=False,
+            payment_count=total_payment_count,
+            total_payments=total_payment_count,
+            batch_id=running_batch.id,
+        )
+
+    # 2. Latest completed batch
     batch = (
         db.query(BatchRun)
         .filter(BatchRun.status == "completed")
         .order_by(BatchRun.completed_at.desc(), BatchRun.started_at.desc())
         .first()
     )
+
     if not batch:
-        batch = db.query(BatchRun).order_by(BatchRun.started_at.desc()).first()
-    
-    if not batch:
+        # 3. No running or completed batch → ready
         return DashboardStats(
-            total_payments=0,
-            total_at_risk=0,
-            ground_truth_recoverable_revenue=0,
-            ai_predicted_recoverable_revenue=0,
-            total_recoverable=0,
-            total_recovered=0,
-            recovery_rate=0.0,
-            recovery_efficiency=0.0,
-            approved_count=0,
-            blocked_count=0,
-            escalated_count=0,
-            successful_recovery_count=0,
-            ai_precision=0.0,
-            ai_recall=0.0,
-            ai_f1=0.0,
-            intervention_accuracy=0.0,
-            approved_action_success_rate=0.0,
-            policy_block_rate=0.0,
-            escalation_rate=0.0,
+            state="ready",
+            has_analysis=False,
+            payment_count=total_payment_count,
+            total_payments=total_payment_count,
             batch_id=None,
         )
-        
+
     return DashboardStats(
+        state="completed",
+        has_analysis=True,
+        payment_count=total_payment_count,
         total_payments=batch.total_payments,
         total_at_risk=batch.total_at_risk,
         ground_truth_recoverable_revenue=batch.ground_truth_recoverable_revenue or 0,

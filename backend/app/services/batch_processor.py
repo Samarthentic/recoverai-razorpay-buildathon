@@ -334,90 +334,97 @@ def run_batch(db: Session, settings: Settings | None = None) -> BatchRun:
 
     logger.info(f"Starting batch run {batch_id}")
 
-    # Fetch all failed payments
-    payments = db.query(Payment).filter(Payment.status == "failed").all()
+    try:
+        # Fetch all failed payments
+        payments = db.query(Payment).filter(Payment.status == "failed").all()
 
-    if not payments:
+        if not payments:
+            batch.status = "completed"
+            batch.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.warning("No failed payments found for batch processing")
+            return batch
+
+        results: list[RecoveryResult] = []
+        llm_calls_made = 0
+        max_llm_calls = settings.ai_batch_limit  # 50 by default, 0 = unlimited
+
+        for i, payment in enumerate(payments):
+            try:
+                # Check if we should call the live LLM or heuristic fallback
+                use_llm = True
+                if max_llm_calls > 0 and llm_calls_made >= max_llm_calls:
+                    use_llm = False
+                elif not settings.gemini_api_key:
+                    use_llm = False
+
+                result = process_single_payment(
+                    db, payment, batch_id, policy_config, settings, use_llm=use_llm
+                )
+                results.append(result)
+
+                if result.is_llm_generated:
+                    llm_calls_made += 1
+
+                if (i + 1) % 50 == 0:
+                    db.commit()
+                    logger.info(f"Processed {i + 1}/{len(payments)} payments (Live LLM calls: {llm_calls_made})")
+
+            except Exception as e:
+                logger.error(f"Error processing payment {payment.id}: {e}", exc_info=True)
+                _log_audit(db, batch_id, payment.id, "error", {"error": str(e)})
+
+        # Compute comprehensive metrics
+        metrics = calculate_metrics(payments, results)
+
         batch.status = "completed"
+        batch.total_payments = len(payments)
+        batch.total_at_risk = metrics.get("total_at_risk", 0)
+        batch.ground_truth_recoverable_revenue = metrics.get("ground_truth_recoverable_revenue", 0)
+        batch.ai_predicted_recoverable_revenue = metrics.get("ai_predicted_recoverable_revenue", 0)
+        batch.total_recoverable = metrics.get("total_recoverable", 0)
+        batch.total_recovered = metrics.get("total_recovered", 0)
+        batch.recovery_rate = metrics.get("recovery_rate", 0.0)
+        batch.recovery_efficiency = metrics.get("recovery_efficiency", 0.0)
+        batch.approved_count = metrics.get("approved_count", 0)
+        batch.blocked_count = metrics.get("blocked_count", 0)
+        batch.escalated_count = metrics.get("escalated_count", 0)
+        batch.successful_recovery_count = metrics.get("successful_recovery_count", 0)
+        
+        # Full Pipeline Metrics
+        batch.ai_precision = metrics.get("ai_precision", 0.0)
+        batch.ai_recall = metrics.get("ai_recall", 0.0)
+        batch.ai_f1 = metrics.get("ai_f1", 0.0)
+        batch.intervention_accuracy = metrics.get("intervention_accuracy", 0.0)
+        batch.approved_action_success_rate = metrics.get("approved_action_success_rate", 0.0)
+        batch.policy_block_rate = metrics.get("policy_block_rate", 0.0)
+        batch.escalation_rate = metrics.get("escalation_rate", 0.0)
+
+        # Gemini LLM-Specific Metrics
+        batch.llm_analyzed_count = metrics.get("llm_analyzed_count", 0)
+        batch.heuristic_fallback_count = metrics.get("heuristic_fallback_count", 0)
+        batch.llm_precision = metrics.get("llm_precision", 0.0)
+        batch.llm_recall = metrics.get("llm_recall", 0.0)
+        batch.llm_f1 = metrics.get("llm_f1", 0.0)
+        batch.llm_intervention_accuracy = metrics.get("llm_intervention_accuracy", 0.0)
+
+        batch.completed_at = datetime.now(timezone.utc)
+
+        db.commit()
+
+        logger.info(
+            f"Batch {batch_id} completed: {len(payments)} payments | "
+            f"At Risk: ₹{batch.total_at_risk/100:.2f} | "
+            f"GT Recoverable: ₹{batch.ground_truth_recoverable_revenue/100:.2f} | "
+            f"AI Predicted: ₹{batch.ai_predicted_recoverable_revenue/100:.2f} | "
+            f"Recovered: ₹{batch.total_recovered/100:.2f} (Rate: {batch.recovery_rate:.1f}%, Efficiency: {batch.recovery_efficiency:.1f}%) | "
+            f"Pipeline F1: {batch.ai_f1:.1f}% | LLM F1 (n={batch.llm_analyzed_count}): {batch.llm_f1:.1f}%"
+        )
+
+        return batch
+    except Exception as exc:
+        logger.error(f"Critical failure in batch run {batch_id}: {exc}", exc_info=True)
+        batch.status = "failed"
         batch.completed_at = datetime.now(timezone.utc)
         db.commit()
-        logger.warning("No failed payments found for batch processing")
-        return batch
-
-    results: list[RecoveryResult] = []
-    llm_calls_made = 0
-    max_llm_calls = settings.ai_batch_limit  # 50 by default, 0 = unlimited
-
-    for i, payment in enumerate(payments):
-        try:
-            # Check if we should call the live LLM or heuristic fallback
-            use_llm = True
-            if max_llm_calls > 0 and llm_calls_made >= max_llm_calls:
-                use_llm = False
-            elif not settings.gemini_api_key:
-                use_llm = False
-
-            result = process_single_payment(
-                db, payment, batch_id, policy_config, settings, use_llm=use_llm
-            )
-            results.append(result)
-
-            if result.is_llm_generated:
-                llm_calls_made += 1
-
-            if (i + 1) % 50 == 0:
-                db.commit()
-                logger.info(f"Processed {i + 1}/{len(payments)} payments (Live LLM calls: {llm_calls_made})")
-
-        except Exception as e:
-            logger.error(f"Error processing payment {payment.id}: {e}", exc_info=True)
-            _log_audit(db, batch_id, payment.id, "error", {"error": str(e)})
-
-    # Compute comprehensive metrics
-    metrics = calculate_metrics(payments, results)
-
-    batch.status = "completed"
-    batch.total_payments = len(payments)
-    batch.total_at_risk = metrics.get("total_at_risk", 0)
-    batch.ground_truth_recoverable_revenue = metrics.get("ground_truth_recoverable_revenue", 0)
-    batch.ai_predicted_recoverable_revenue = metrics.get("ai_predicted_recoverable_revenue", 0)
-    batch.total_recoverable = metrics.get("total_recoverable", 0)
-    batch.total_recovered = metrics.get("total_recovered", 0)
-    batch.recovery_rate = metrics.get("recovery_rate", 0.0)
-    batch.recovery_efficiency = metrics.get("recovery_efficiency", 0.0)
-    batch.approved_count = metrics.get("approved_count", 0)
-    batch.blocked_count = metrics.get("blocked_count", 0)
-    batch.escalated_count = metrics.get("escalated_count", 0)
-    batch.successful_recovery_count = metrics.get("successful_recovery_count", 0)
-    
-    # Full Pipeline Metrics
-    batch.ai_precision = metrics.get("ai_precision", 0.0)
-    batch.ai_recall = metrics.get("ai_recall", 0.0)
-    batch.ai_f1 = metrics.get("ai_f1", 0.0)
-    batch.intervention_accuracy = metrics.get("intervention_accuracy", 0.0)
-    batch.approved_action_success_rate = metrics.get("approved_action_success_rate", 0.0)
-    batch.policy_block_rate = metrics.get("policy_block_rate", 0.0)
-    batch.escalation_rate = metrics.get("escalation_rate", 0.0)
-
-    # Gemini LLM-Specific Metrics
-    batch.llm_analyzed_count = metrics.get("llm_analyzed_count", 0)
-    batch.heuristic_fallback_count = metrics.get("heuristic_fallback_count", 0)
-    batch.llm_precision = metrics.get("llm_precision", 0.0)
-    batch.llm_recall = metrics.get("llm_recall", 0.0)
-    batch.llm_f1 = metrics.get("llm_f1", 0.0)
-    batch.llm_intervention_accuracy = metrics.get("llm_intervention_accuracy", 0.0)
-
-    batch.completed_at = datetime.now(timezone.utc)
-
-    db.commit()
-
-    logger.info(
-        f"Batch {batch_id} completed: {len(payments)} payments | "
-        f"At Risk: ₹{batch.total_at_risk/100:.2f} | "
-        f"GT Recoverable: ₹{batch.ground_truth_recoverable_revenue/100:.2f} | "
-        f"AI Predicted: ₹{batch.ai_predicted_recoverable_revenue/100:.2f} | "
-        f"Recovered: ₹{batch.total_recovered/100:.2f} (Rate: {batch.recovery_rate:.1f}%, Efficiency: {batch.recovery_efficiency:.1f}%) | "
-        f"Pipeline F1: {batch.ai_f1:.1f}% | LLM F1 (n={batch.llm_analyzed_count}): {batch.llm_f1:.1f}%"
-    )
-
-    return batch
+        raise

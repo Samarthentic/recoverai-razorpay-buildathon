@@ -136,21 +136,32 @@ class BatchRunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BatchResetOut(BaseModel):
+    """Response returned when recovery analysis is reset."""
+    status: str = "reset"
+    state: str = "ready"
+    payment_count: int
+    batch_id: str | None = None
+
+
 # ---------- Dashboard ----------
 
 class DashboardStats(BaseModel):
     """Aggregated KPIs for the dashboard."""
-    total_payments: int
-    total_at_risk: int                               # paise
+    state: str = "ready"                             # "ready" | "running" | "completed"
+    has_analysis: bool = False
+    payment_count: int = 0                           # payments available in dataset
+    total_payments: int = 0
+    total_at_risk: int = 0                           # paise
     ground_truth_recoverable_revenue: int = 0        # paise
     ai_predicted_recoverable_revenue: int = 0        # paise
     total_recoverable: int = 0                       # paise (backward compat)
-    total_recovered: int                             # paise
-    recovery_rate: float                             # percentage
+    total_recovered: int = 0                         # paise
+    recovery_rate: float = 0.0                       # percentage
     recovery_efficiency: float = 0.0                 # percentage
-    approved_count: int
-    blocked_count: int
-    escalated_count: int
+    approved_count: int = 0
+    blocked_count: int = 0
+    escalated_count: int = 0
     successful_recovery_count: int = 0
 
     # Full Pipeline Metrics

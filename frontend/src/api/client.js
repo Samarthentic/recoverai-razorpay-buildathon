@@ -44,6 +44,8 @@ export const analyzePayment = (paymentId) =>
 // Batch
 export const runBatch = () => request('/batch/run', { method: 'POST' });
 
+export const resetBatch = () => request('/batch/reset', { method: 'POST' });
+
 export const getBatches = () => request('/batch');
 
 export const getBatch = (batchId) => request(`/batch/${batchId}`);

@@ -14,6 +14,7 @@ import {
   Cpu, 
   ArrowUpRight,
   RefreshCw,
+  RotateCcw,
   Info,
   ShieldCheck,
   Zap,
@@ -35,6 +36,7 @@ import {
 import { 
   getDashboardStats, 
   runBatch, 
+  resetBatch,
   seedPayments, 
   getDemoCases,
   getBatchResults 
@@ -54,8 +56,10 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
   const [demoCases, setDemoCases] = useState([]);
   const [recentResults, setRecentResults] = useState([]);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
-  const [batchCompletedMsg, setBatchCompletedMsg] = useState(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [notification, setNotification] = useState(null);
 
   const fetchData = async () => {
     try {
@@ -66,9 +70,11 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
       setStats(statsData);
       setDemoCases(demoData || []);
 
-      if (statsData?.batch_id) {
+      if (statsData?.batch_id && statsData?.has_analysis) {
         const results = await getBatchResults(statsData.batch_id, { limit: 8 });
         setRecentResults(results || []);
+      } else {
+        setRecentResults([]);
       }
     } catch (error) {
       console.error('Error fetching dashboard telemetry:', error);
@@ -80,28 +86,74 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
   }, []);
 
   const handleSeedData = async () => {
+    if (isSeeding || isBatchRunning || isResetting) return;
     setIsSeeding(true);
-    setBatchCompletedMsg(null);
+    setNotification(null);
     try {
-      await seedPayments();
+      const res = await seedPayments();
       await fetchData();
+      setRecentResults([]);
+      setNotification({
+        type: 'success',
+        message: res.message || 'Successfully seeded 520 synthetic payments.'
+      });
+      setTimeout(() => setNotification(null), 5000);
     } catch (error) {
       console.error('Error seeding data:', error);
+      setNotification({
+        type: 'error',
+        message: 'Failed to seed data: ' + (error.message || 'Unknown error')
+      });
+      setTimeout(() => setNotification(null), 5000);
     } finally {
       setIsSeeding(false);
     }
   };
 
+  const handleResetAnalysis = async () => {
+    if (isResetting || isBatchRunning || isSeeding) return;
+    setIsResetting(true);
+    setShowResetConfirm(false);
+    try {
+      await resetBatch();
+      await fetchData();
+      setRecentResults([]);
+      setNotification({
+        type: 'success',
+        message: 'Analysis reset. Ready for a new recovery run.'
+      });
+      setTimeout(() => setNotification(null), 5000);
+    } catch (error) {
+      console.error('Error resetting analysis:', error);
+      setNotification({
+        type: 'error',
+        message: 'Failed to reset analysis: ' + (error.message || 'Unknown error')
+      });
+      setTimeout(() => setNotification(null), 5000);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   const handleRunBatch = async () => {
+    if (isBatchRunning || isResetting || isSeeding) return;
     setIsBatchRunning(true);
-    setBatchCompletedMsg(null);
+    setNotification(null);
     try {
       const batchRes = await runBatch();
       await fetchData();
-      setBatchCompletedMsg(`Batch ${batchRes.id.slice(0, 12)} completed: ${batchRes.total_payments} payments analyzed.`);
-      setTimeout(() => setBatchCompletedMsg(null), 6000);
+      setNotification({
+        type: 'success',
+        message: `Batch ${batchRes.id.slice(0, 12)} completed: ${batchRes.total_payments} payments analyzed.`
+      });
+      setTimeout(() => setNotification(null), 6000);
     } catch (error) {
       console.error('Error executing batch:', error);
+      setNotification({
+        type: 'error',
+        message: 'Batch execution failed: ' + (error.message || 'Unknown error')
+      });
+      setTimeout(() => setNotification(null), 6000);
     } finally {
       setIsBatchRunning(false);
     }
@@ -164,6 +216,10 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
     },
   };
 
+  const hasAnalysis = Boolean(stats?.has_analysis && stats?.state === 'completed');
+  const isRunning = Boolean(isBatchRunning || stats?.state === 'running');
+  const isReady = !isRunning && !hasAnalysis;
+
   return (
     <div className="space-y-6">
       {/* Top Operations Header */}
@@ -186,16 +242,31 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
         <div className="flex items-center flex-wrap gap-2.5">
           <button
             onClick={handleSeedData}
-            disabled={isSeeding || isBatchRunning}
-            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition flex items-center gap-2 disabled:opacity-50"
-            title="Reset and re-seed 520 synthetic payments"
+            disabled={isSeeding || isBatchRunning || isResetting}
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition flex items-center gap-2 disabled:opacity-40"
+            title="Re-seed 520 synthetic payments"
           >
             <Database className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
             {isSeeding ? 'Seeding...' : 'Seed Dataset'}
           </button>
+
+          <button
+            onClick={() => setShowResetConfirm(true)}
+            disabled={!hasAnalysis || isBatchRunning || isResetting || isSeeding}
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-2 border ${
+              hasAnalysis && !isBatchRunning && !isResetting
+                ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200 cursor-pointer shadow-xs'
+                : 'bg-slate-900/50 border-slate-800 text-slate-500 cursor-not-allowed opacity-40'
+            }`}
+            title={hasAnalysis ? "Reset current recovery analysis and return to Ready" : "No analysis to reset"}
+          >
+            <RotateCcw className={`h-3.5 w-3.5 ${isResetting ? 'animate-spin' : ''}`} />
+            {isResetting ? 'Resetting...' : 'Reset Analysis'}
+          </button>
+
           <button
             onClick={handleRunBatch}
-            disabled={isBatchRunning || isSeeding}
+            disabled={isBatchRunning || isSeeding || isResetting}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition shadow-xs flex items-center gap-2 disabled:opacity-50"
           >
             {isBatchRunning ? (
@@ -213,30 +284,297 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
         </div>
       </div>
 
-      {/* Completion Notification */}
-      {batchCompletedMsg && (
-        <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs px-4 py-3 rounded-xl flex items-center gap-2">
-          <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
-          <span className="font-semibold">{batchCompletedMsg}</span>
+      {/* Lightweight Reset Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-xl border border-slate-200 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="h-10 w-10 rounded-full bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center flex-shrink-0">
+                <RotateCcw className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-slate-900">
+                  Reset Current Recovery Analysis?
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  This will remove the current batch results and return the dashboard to Ready. Your {stats.payment_count || 520} synthetic payments will remain available.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                disabled={isResetting}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleResetAnalysis}
+                disabled={isResetting}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition flex items-center gap-1.5 shadow-xs"
+              >
+                {isResetting ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Resetting...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reset Analysis
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Primary Financial KPI Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Revenue at Risk */}
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-1">
-          <div className="flex items-center justify-between text-slate-500">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Revenue at Risk</span>
-            <AlertTriangle className="h-4 w-4 text-rose-500" />
+      {/* Toast Notification */}
+      {notification && (
+        <div className={`text-xs px-4 py-3 rounded-xl flex items-center justify-between gap-3 border transition-all ${
+          notification.type === 'success'
+            ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+            : 'bg-rose-50 border-rose-300 text-rose-900'
+        }`}>
+          <div className="flex items-center gap-2">
+            {notification.type === 'success' ? (
+              <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+            ) : (
+              <AlertTriangle className="h-4 w-4 text-rose-600 flex-shrink-0" />
+            )}
+            <span className="font-semibold">{notification.message}</span>
           </div>
-          <div className="text-2xl font-black text-slate-950 font-numeric tracking-tight pt-0.5">
-            {formatINRLakh(stats.total_at_risk)}
+          <button
+            onClick={() => setNotification(null)}
+            className="text-xs font-bold text-slate-400 hover:text-slate-600"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* RUNNING STATE UI */}
+      {isRunning && (
+        <div className="bg-white rounded-xl border border-indigo-200 p-10 shadow-xs text-center space-y-4">
+          <div className="inline-flex items-center justify-center p-3.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-600">
+            <RefreshCw className="h-8 w-8 animate-spin" />
           </div>
-          <div className="text-[11px] text-slate-500 flex items-center justify-between pt-1 border-t border-slate-100">
-            <span>Total failed volume</span>
-            <span className="font-semibold text-slate-800">{stats.total_payments} records</span>
+          <div className="space-y-1">
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded text-[10px] font-extrabold bg-indigo-100 text-indigo-800 uppercase tracking-wider">
+              ANALYSIS IN PROGRESS
+            </span>
+            <h2 className="text-xl font-black text-slate-950 tracking-tight">
+              Analyzing {stats?.payment_count || 520} Payments...
+            </h2>
+            <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+              Running Gemini diagnosis and deterministic policy checks...
+            </p>
+          </div>
+          <div className="max-w-md mx-auto pt-2">
+            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+              <div className="bg-indigo-600 h-1.5 rounded-full animate-pulse w-3/4" />
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono mt-2">
+              <span>Pipeline: AI Diagnosis &rarr; Policy Gate &rarr; Gateway Simulation</span>
+              <span className="font-semibold text-indigo-600 flex items-center gap-1">
+                <RefreshCw className="h-3 w-3 animate-spin" /> Running...
+              </span>
+            </div>
           </div>
         </div>
+      )}
+
+      {/* READY STATE UI */}
+      {isReady && (
+        <div className="space-y-6">
+          {/* Main Hero Panel for Ready State */}
+          <div className="bg-white rounded-xl border border-slate-200 p-8 shadow-2xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 pb-6 border-b border-slate-100">
+              <div className="flex items-start gap-4">
+                <div className="h-12 w-12 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0 shadow-2xs">
+                  <Play className="h-6 w-6 fill-indigo-600" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase tracking-wider">
+                      ● READY TO ANALYZE
+                    </span>
+                    <span className="text-xs text-slate-400 font-mono">Dataset Loaded</span>
+                  </div>
+                  <h2 className="text-xl font-black text-slate-950 tracking-tight mt-1">
+                    {stats.payment_count || 520} Synthetic Payments Available
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1 max-w-xl leading-relaxed">
+                    No recovery analysis has been run yet. The database contains realistic Indian payment failure scenarios across UPI, Cards, Netbanking, and eMandates, complete with hidden ground-truth benchmarks.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={handleRunBatch}
+                disabled={isBatchRunning || isSeeding || isResetting}
+                className="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition shadow-sm flex items-center justify-center gap-2 self-start sm:self-auto flex-shrink-0"
+              >
+                <Play className="h-4 w-4 fill-white" />
+                Run Recovery Batch
+              </button>
+            </div>
+
+            {/* Ready State Component Architecture Strip */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="flex items-center justify-between text-slate-500">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Failed Dataset</span>
+                  <Database className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div className="text-xl font-bold text-slate-900 font-numeric">
+                  {stats.payment_count || 520} Records
+                </div>
+                <p className="text-[11px] text-slate-500 pt-1 border-t border-slate-200/60">
+                  Simulated multi-rail transaction telemetry.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="flex items-center justify-between text-slate-500">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Policy Engine</span>
+                  <ShieldCheck className="h-4 w-4 text-purple-600" />
+                </div>
+                <div className="text-xl font-bold text-slate-900 font-numeric">
+                  8 Invariants
+                </div>
+                <p className="text-[11px] text-slate-500 pt-1 border-t border-slate-200/60">
+                  Hard safety constraints gating AI actions.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="flex items-center justify-between text-slate-500">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">AI Root Cause</span>
+                  <Sparkles className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div className="text-xl font-bold text-slate-900">
+                  Gemini 3.5 Flash
+                </div>
+                <p className="text-[11px] text-slate-500 pt-1 border-t border-slate-200/60">
+                  Structured diagnostic reasoning pipeline.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="flex items-center justify-between text-slate-500">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Benchmark</span>
+                  <Target className="h-4 w-4 text-emerald-600" />
+                </div>
+                <div className="text-xl font-bold text-slate-900">
+                  Ground Truth
+                </div>
+                <p className="text-[11px] text-slate-500 pt-1 border-t border-slate-200/60">
+                  Isolated post-hoc precision & recall scoring.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Demonstration Scenarios Preview in Ready State */}
+          <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-2xs space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-bold text-slate-950 uppercase tracking-wider">
+                    Deterministic Demonstration Scenarios
+                  </h2>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200 uppercase">
+                    5 Guaranteed Test Cases
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  These verified benchmark cases are loaded in the database and ready for pipeline execution. Click to inspect their input failure conditions.
+                </p>
+              </div>
+              <button 
+                onClick={onViewPayments}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+              >
+                All Payments <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5">
+              {demoCases.map((c) => {
+                const meta = demoScenarioMeta[c.id] || {
+                  tag: 'CASE',
+                  title: c.id,
+                  desc: c.failure_reason,
+                  expected: 'EVALUATE',
+                  badgeColor: 'bg-slate-100 text-slate-700 border-slate-200'
+                };
+                return (
+                  <div
+                    key={c.id}
+                    onClick={() => onSelectPayment(c.id)}
+                    className="group relative p-4 rounded-lg border border-slate-200 hover:border-indigo-400 bg-white hover:bg-indigo-50/20 transition-all cursor-pointer shadow-2xs flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-slate-900 text-white tracking-wider">
+                          {meta.tag}
+                        </span>
+                        <span className="font-mono text-xs font-bold text-slate-900 font-numeric">
+                          {formatINR(c.amount)}
+                        </span>
+                      </div>
+                      <h3 className="text-xs font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
+                        {meta.title}
+                      </h3>
+                      <p className="text-[11px] text-slate-500 mt-1 line-clamp-2 leading-relaxed">
+                        {meta.desc}
+                      </p>
+                    </div>
+
+                    <div className="mt-3 pt-2.5 border-t border-slate-100">
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        Expected Policy:
+                      </div>
+                      <div className="text-[11px] font-mono font-medium text-slate-800 truncate mt-0.5">
+                        {meta.expected}
+                      </div>
+                      <div className="flex items-center justify-end text-indigo-600 text-[11px] font-bold mt-2 group-hover:translate-x-0.5 transition-transform">
+                        Inspect Trace <ArrowRight className="h-3 w-3 ml-0.5" />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* COMPLETED STATE UI: Full Production Dashboard */}
+      {hasAnalysis && !isRunning && (
+        <div className="space-y-6">
+          {/* Primary Financial KPI Row */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Revenue at Risk */}
+            <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-1">
+              <div className="flex items-center justify-between text-slate-500">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Revenue at Risk</span>
+                <AlertTriangle className="h-4 w-4 text-rose-500" />
+              </div>
+              <div className="text-2xl font-black text-slate-950 font-numeric tracking-tight pt-0.5">
+                {formatINRLakh(stats.total_at_risk)}
+              </div>
+              <div className="text-[11px] text-slate-500 flex items-center justify-between pt-1 border-t border-slate-100">
+                <span>Total failed volume</span>
+                <span className="font-semibold text-slate-800">{stats.total_payments} records</span>
+              </div>
+            </div>
 
         {/* GT Recoverable Pool */}
         <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs space-y-1">
@@ -681,5 +1019,7 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
         </div>
       </div>
     </div>
-  );
+  )}
+</div>
+);
 }
