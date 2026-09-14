@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Activity, 
   TrendingUp, 
@@ -60,8 +60,19 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
   const [isSeeding, setIsSeeding] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [notification, setNotification] = useState(null);
+  const pollingRef = useRef(null);
+  const isCompletedRef = useRef(false);
+  const pollSeqRef = useRef(0);
 
-  const fetchData = async () => {
+  // Stable reference to stop polling — called on completion, reset, or unmount
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  }, []);
+
+  const fetchData = useCallback(async () => {
     try {
       const [statsData, demoData] = await Promise.all([
         getDashboardStats(),
@@ -76,14 +87,85 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
       } else {
         setRecentResults([]);
       }
+
+      return statsData;
     } catch (error) {
       console.error('Error fetching dashboard telemetry:', error);
+      return null;
     }
-  };
-
-  useEffect(() => {
-    fetchData();
   }, []);
+
+  // Start polling: calls /api/dashboard/stats every 1.5s until state === "completed"
+  const startPolling = useCallback(() => {
+    // Guard: only one polling loop at a time
+    stopPolling();
+    let readyPollCount = 0;
+
+    pollingRef.current = setInterval(async () => {
+      // Out-of-order guard: tag each poll with an incrementing sequence number
+      const currentSeq = ++pollSeqRef.current;
+
+      try {
+        const freshStats = await getDashboardStats();
+
+        // If completed already or polling was stopped, ignore late responses
+        if (isCompletedRef.current || !pollingRef.current) return;
+
+        // Discard if a newer poll response has already arrived
+        if (currentSeq < pollSeqRef.current) return;
+
+        if (!freshStats) return;
+
+        // Case 1: Batch completed successfully
+        if (freshStats.state === 'completed' && freshStats.has_analysis) {
+          isCompletedRef.current = true;
+          stopPolling();
+          setIsBatchRunning(false);
+          await fetchData();
+          setNotification({
+            type: 'success',
+            message: `Batch ${(freshStats.batch_id || '').slice(0, 12)} completed: ${freshStats.total_payments} payments analyzed.`
+          });
+          setTimeout(() => setNotification(null), 6000);
+          return;
+        }
+
+        // Case 2: Batch is actively running
+        if (freshStats.state === 'running') {
+          readyPollCount = 0;
+          setStats(prev => prev ? { ...prev, payment_count: freshStats.payment_count } : prev);
+          return;
+        }
+
+        // Case 3: State is "ready"
+        // Right after clicking Run, the backend might take 100-500ms to commit the running BatchRun.
+        // Tolerating temporary "ready" prevents early abort of polling.
+        if (freshStats.state === 'ready') {
+          readyPollCount++;
+          // Safety guard: if ready for >30 seconds (20 polls), assume run never started
+          if (readyPollCount > 20) {
+            stopPolling();
+            setIsBatchRunning(false);
+            await fetchData();
+          }
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    }, 1500);
+  }, [stopPolling, fetchData]);
+
+  // Initial data load + resume polling if backend says "running"
+  useEffect(() => {
+    fetchData().then((statsData) => {
+      if (statsData?.state === 'running') {
+        isCompletedRef.current = false;
+        setIsBatchRunning(true);
+        startPolling();
+      }
+    });
+    return () => stopPolling(); // cleanup on unmount
+  }, [fetchData, startPolling, stopPolling]);
 
   const handleSeedData = async () => {
     if (isSeeding || isBatchRunning || isResetting) return;
@@ -114,6 +196,8 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
     if (isResetting || isBatchRunning || isSeeding) return;
     setIsResetting(true);
     setShowResetConfirm(false);
+    isCompletedRef.current = false;
+    stopPolling();
     try {
       await resetBatch();
       await fetchData();
@@ -139,23 +223,37 @@ export default function Dashboard({ onSelectPayment, onViewPayments, onViewEvalu
     if (isBatchRunning || isResetting || isSeeding) return;
     setIsBatchRunning(true);
     setNotification(null);
+    isCompletedRef.current = false;
+    pollSeqRef.current = 0;
+
     try {
-      const batchRes = await runBatch();
-      await fetchData();
-      setNotification({
-        type: 'success',
-        message: `Batch ${batchRes.id.slice(0, 12)} completed: ${batchRes.total_payments} payments analyzed.`
+      // Fire the batch POST — don't await its completion.
+      // The backend sets BatchRun.status="running" immediately and processes
+      // in the request thread. Polling will detect when it finishes.
+      runBatch().catch((error) => {
+        console.error('Batch run request error:', error);
+        // If batch hasn't already completed successfully, handle failure cleanly
+        if (!isCompletedRef.current) {
+          stopPolling();
+          setIsBatchRunning(false);
+          setNotification({
+            type: 'error',
+            message: 'Batch execution failed: ' + (error.message || 'Unknown error')
+          });
+          setTimeout(() => setNotification(null), 6000);
+          fetchData();
+        }
       });
-      setTimeout(() => setNotification(null), 6000);
+      // Start polling for completion
+      startPolling();
     } catch (error) {
-      console.error('Error executing batch:', error);
+      console.error('Error starting batch:', error);
+      setIsBatchRunning(false);
       setNotification({
         type: 'error',
-        message: 'Batch execution failed: ' + (error.message || 'Unknown error')
+        message: 'Failed to start batch: ' + (error.message || 'Unknown error')
       });
       setTimeout(() => setNotification(null), 6000);
-    } finally {
-      setIsBatchRunning(false);
     }
   };
 

@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import time as _time
 
 from sqlalchemy.orm import Session
 
@@ -335,8 +337,12 @@ def run_batch(db: Session, settings: Settings | None = None) -> BatchRun:
     logger.info(f"Starting batch run {batch_id}")
 
     try:
+        t_start = _time.monotonic()
+
         # Fetch all failed payments
         payments = db.query(Payment).filter(Payment.status == "failed").all()
+        t_load = _time.monotonic()
+        logger.info(f"[RecoverAI] Loaded {len(payments)} payments in {(t_load - t_start)*1000:.0f} ms")
 
         if not payments:
             batch.status = "completed"
@@ -345,34 +351,95 @@ def run_batch(db: Session, settings: Settings | None = None) -> BatchRun:
             logger.warning("No failed payments found for batch processing")
             return batch
 
+        max_llm_calls = settings.ai_batch_limit  # 20 by default, 0 = unlimited
+        has_api_key = bool(settings.gemini_api_key)
+
+        # Partition payments: LLM candidates vs heuristic-only
+        llm_payments = []
+        heuristic_payments = []
+        for payment in payments:
+            if has_api_key and (max_llm_calls == 0 or len(llm_payments) < max_llm_calls):
+                llm_payments.append(payment)
+            else:
+                heuristic_payments.append(payment)
+
         results: list[RecoveryResult] = []
-        llm_calls_made = 0
-        max_llm_calls = settings.ai_batch_limit  # 50 by default, 0 = unlimited
+        # Map payment_id -> result to preserve original order
+        result_map: dict[str, RecoveryResult] = {}
 
-        for i, payment in enumerate(payments):
+        # --- Phase 1: Process LLM payments with bounded concurrency ---
+        t_llm_start = _time.monotonic()
+        if llm_payments:
+            def _process_llm_payment(pay):
+                """Process a single LLM payment in a worker thread using its own DB session."""
+                from app.database import SessionLocal
+                thread_db = SessionLocal()
+                thread_db.expire_on_commit = False
+                try:
+                    r = process_single_payment(
+                        thread_db, pay, batch_id, policy_config, settings, use_llm=True
+                    )
+                    thread_db.commit()
+                    # Expunge so the object is usable after session closes
+                    thread_db.expunge(r)
+                    return pay.id, r
+                except Exception as e:
+                    thread_db.rollback()
+                    logger.error(f"Error processing payment {pay.id}: {e}", exc_info=True)
+                    _log_audit(thread_db, batch_id, pay.id, "error", {"error": str(e)})
+                    thread_db.commit()
+                    return pay.id, None
+                finally:
+                    thread_db.close()
+
+            concurrency = min(4, len(llm_payments))
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {executor.submit(_process_llm_payment, p): p for p in llm_payments}
+                for future in as_completed(futures):
+                    pay_id, result = future.result()
+                    if result is not None:
+                        result_map[pay_id] = result
+
+        t_llm_end = _time.monotonic()
+        logger.info(
+            f"[RecoverAI] Gemini analysis ({len(llm_payments)} payments, "
+            f"concurrency={min(4, max(1, len(llm_payments)))}) completed in "
+            f"{(t_llm_end - t_llm_start)*1000:.0f} ms"
+        )
+
+        # --- Phase 2: Process heuristic-only payments sequentially (fast) ---
+        t_heuristic_start = _time.monotonic()
+        for i, payment in enumerate(heuristic_payments):
             try:
-                # Check if we should call the live LLM or heuristic fallback
-                use_llm = True
-                if max_llm_calls > 0 and llm_calls_made >= max_llm_calls:
-                    use_llm = False
-                elif not settings.gemini_api_key:
-                    use_llm = False
-
                 result = process_single_payment(
-                    db, payment, batch_id, policy_config, settings, use_llm=use_llm
+                    db, payment, batch_id, policy_config, settings, use_llm=False
                 )
-                results.append(result)
+                result_map[payment.id] = result
 
-                if result.is_llm_generated:
-                    llm_calls_made += 1
-
-                if (i + 1) % 50 == 0:
+                if (i + 1) % 100 == 0:
                     db.commit()
-                    logger.info(f"Processed {i + 1}/{len(payments)} payments (Live LLM calls: {llm_calls_made})")
+                    logger.info(f"[RecoverAI] Heuristic processed {i + 1}/{len(heuristic_payments)} payments")
 
             except Exception as e:
                 logger.error(f"Error processing payment {payment.id}: {e}", exc_info=True)
                 _log_audit(db, batch_id, payment.id, "error", {"error": str(e)})
+
+        db.commit()
+        t_heuristic_end = _time.monotonic()
+        logger.info(
+            f"[RecoverAI] Heuristic fallback ({len(heuristic_payments)} payments) "
+            f"completed in {(t_heuristic_end - t_heuristic_start)*1000:.0f} ms"
+        )
+
+        # Reassemble results in original payment order
+        for payment in payments:
+            if payment.id in result_map:
+                results.append(result_map[payment.id])
+
+        # Merge LLM-thread results into the main session for metric calculation
+        # The results were committed in worker sessions; re-query them for metrics
+        # We use the in-memory result objects which have all needed attributes
+        t_metrics_start = _time.monotonic()
 
         # Compute comprehensive metrics
         metrics = calculate_metrics(payments, results)
@@ -411,9 +478,14 @@ def run_batch(db: Session, settings: Settings | None = None) -> BatchRun:
         batch.completed_at = datetime.now(timezone.utc)
 
         db.commit()
+        t_end = _time.monotonic()
 
         logger.info(
-            f"Batch {batch_id} completed: {len(payments)} payments | "
+            f"[RecoverAI] Metrics + persistence completed in {(t_end - t_metrics_start)*1000:.0f} ms"
+        )
+        logger.info(
+            f"[RecoverAI] Batch {batch_id} completed in {(t_end - t_start)*1000:.0f} ms total: "
+            f"{len(payments)} payments | "
             f"At Risk: ₹{batch.total_at_risk/100:.2f} | "
             f"GT Recoverable: ₹{batch.ground_truth_recoverable_revenue/100:.2f} | "
             f"AI Predicted: ₹{batch.ai_predicted_recoverable_revenue/100:.2f} | "

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import traceback
 from typing import Optional
@@ -39,6 +40,7 @@ _client: Optional[genai.Client] = None
 _cached_api_key: Optional[str] = None
 _last_gemini_call_time: float = 0.0
 _daily_exhausted_models: set[str] = set()
+_rate_lock = threading.Lock()
 
 
 def _enforce_rate_limit(min_delay: float = 2.0) -> None:
@@ -46,12 +48,13 @@ def _enforce_rate_limit(min_delay: float = 2.0) -> None:
     global _last_gemini_call_time
     if min_delay <= 0:
         return
-    now = time.time()
-    elapsed = now - _last_gemini_call_time
-    if elapsed < min_delay:
-        sleep_time = min_delay - elapsed
-        time.sleep(sleep_time)
-    _last_gemini_call_time = time.time()
+    with _rate_lock:
+        now = time.time()
+        elapsed = now - _last_gemini_call_time
+        if elapsed < min_delay:
+            sleep_time = min_delay - elapsed
+            time.sleep(sleep_time)
+        _last_gemini_call_time = time.time()
 
 
 def _extract_retry_delay(err: Exception) -> Optional[float]:
